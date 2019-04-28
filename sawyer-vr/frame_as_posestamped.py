@@ -171,165 +171,17 @@ class PublishFrameAsPoseStamped(object):
         prex, prey, prez, preqx, preqy, preqz, preqw = 0,0,0,0,0,0,0
         #prex, prey, prez, prer, prep, preyy = 0,0,0,0,0,0
         while not rospy.is_shutdown():
-            # We transform a pose with reference frame
-            # self.frame_to_posestamped
-            # which is 0.0, 0.0, 0.0
-            # to the reference frame to get it's pose
-            
             tfed_ps = self.transform_pose(ps,
                                           self.frame_to_posestamped, # --> I think it will be Controller
                                           self.reference_frame)      # --> I think it will be Headset
-            
-            
-
-            
-            # tfed_ps.pose.position.x    --> this CODE will work I think, considering the mechanics of the work flow
-            # ~~
-            # tfed_ps.pose.orientation.x --> this CODE will work I think, considering the mechanics of the work flow
-            # ~~
-                    
-
-            #r, p, y = euler_from_quaternion([tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w])
-            
-            #delta = np.array([tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z, tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w]) - np.array([prex, prey, prez, preqx, preqy, preqz, preqw])
-            
-            #delta = np.array([tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z, r, p, y]) - np.array([prex, prey, prez, prer, prep, preyy])
-            
-            #print([deltax, deltay, deltaz, deltaqx, deltaqy, deltaqz, deltaqw])
-            #pose_mg = Pose(Point(delta[0], delta[1], delta[2]), Quaternion(delta[3],delta[4],delta[5],delta[6])) 
-            
-            # R.append(delta[3])
-            # Y.append(delta[5])
-            # X.append(k)
-            #quaternion_from_euler(math.pi, 0.0, -math.pi/2.0) 
-            
-
-
-
-
-            self.yuna.ymg   = Pose(Point(prex, prey, prez), Quaternion(preqx, preqy, preqz, preqw))
-            
-            self.rate.sleep()
-            
+            self.yuna.ymg = Pose(Point(prex, prey, prez), Quaternion(preqx, preqy, preqz, preqw))
             self.yuna.ymg_2 = Pose(Point(tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z), Quaternion(tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w))
 
- 
-            # #FOR JOINT POSITION COMMAND
-            # #JUST dx ('x' here means Cartesian)
-            # self.yuna.jyp = [prer, prep, preyy]  # r_t, p_t, y_t 
-            # self.yuna.ymg.position.x = prex      # x_t
-            # self.yuna.ymg.position.y = prey      # y_t
-            # self.yuna.ymg.position.z = prez      # z_t
-            
-            # self.yuna.jyp_2 = [r, p, y]                            # r_t+1, p_t+1, y_t+1 
-            # self.yuna.ymg_2.position.x = tfed_ps.pose.position.x   # x_t+1
-            # self.yuna.ymg_2.position.y = tfed_ps.pose.position.y   # y_t+1
-            # self.yuna.ymg_2.position.z = tfed_ps.pose.position.z   # z_t+1
-           
-
-            # #FOR JOINT POSITION COMMAND
-            # #JUST dx ('x' here means Cartesian)
-            # self.yuna.jyp = [delta[3], delta[4], delta[5]]  # delta r, delta p, delta y 
-            # self.yuna.ymg.position.x = delta[0]             # delta x
-            # self.yuna.ymg.position.y = delta[1]             # delta y
-            # self.yuna.ymg.position.z = delta[2]             # delta z
-            
-
-            # # FOR JOINT VELOCITY COMMAND
-            # # dx/dt ('x' here means Cartesian)
-            # self.yuna.jyp = [delta[3]/self.rrrate, delta[4]/self.rrrate, delta[5]/self.rrrate]   # dr/dt, dp/dt, dy/dt
-            # self.yuna.ymg.position.x = delta[0]/self.rrrate                                      # dx/dt
-            # self.yuna.ymg.position.y = delta[1]/self.rrrate                                      # dy/dt
-            # self.yuna.ymg.position.z = delta[2]/self.rrrate                                      # dz/dt
-            
-
-                                                                                                 # dr/dt, dp/dt, dy/dt
-            #self.yuna.yeji = Twist(Vector3(vx, vy, vz), Vector3(v_roll, v_pitch, v_yaw))         # dx/dt
-           
-
-
-
-
-
-            #pose_mg = Pose(Point(x, y, z), Quaternion(qx, qy, qz, qw))
-            #delta_pub = rospy.Publisher("test", Pose, queue_size=1)
-            self.delta_pub.publish(self.yuna)
-            
-
-
-
             [prex, prey, prez, preqx, preqy, preqz, preqw] = [tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z, tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w]
-            #[prex, prey, prez, prer, prep, preyy] = [tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z, r, p, y]
 
-            
-            # pose = np.array([tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z, tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w])
-            # pose_mg = Pose(Point(pose[0], pose[1], pose[2]), Quaternion(pose[3], pose[4], pose[5],pose[6]))
-            # delta_pub = rospy.Publisher("pose", Pose, queue_size=1)
-            # delta_pub.publish(pose_mg)
-            
-            
-            # print(tfed_ps)
-            #self.pose_pub.publish(tfed_ps)
-            
-            # if self.verbose:
-            #     print(tfed_ps)
-            
-            #self.rate.sleep()
+            self.delta_pub.publish(self.yuna)
+            self.rate.sleep()
 
-            # if rospy.is_shutdown():
-            # os.chdir('/home/irobot/Desktop')
-            # X=[]
-            # with open ('roll.bin', 'wb') as f_1:             
-            #     pickle.dump(R, f_1)
-            # with open ('yaw.bin', 'wb') as f_2:             
-            #     pickle.dump(Y, f_2)    
-            # X=[]
-            # for k in range(len(R)):
-            #     X.append(k)
-
-            # os.chdir('/home/irobot/Desktop')
-            # f = open('roll.csv', 'wb')             
-            # wr = csv.writer(f)
-            # for row in D:
-            #     wr.writerow(row)
-            # #wr.writerow([2, 'co'])
-            # #wr.writerow([3, 'kr'])
-            # f.close()pylab.plot(episodes, scores, 'b')
-            
-            
-            # pylab.plot(X, R, 'b')
-            # pylab.plot(X, Y, 'c')
-            # os.chdir('/home/irobot/Desktop')
-            # pylab.savefig("YMG_roll.png")
-
-            # k += 1
-
-            #self.rate.sleep()
-
-
-
-
-
-
-
-
-            # #time = rospy.Time.now() # present time
-            # # This represents an estimate of a position and velocity in free space
-            # odom = Odometry()     # make class Odometry() as a instance
-            #                     # 'sensor' which measures 'position' & 'rotation'
-        
-            # #odom.header.stamp = time
-            # #odom.header.frame_id = "vive_world"
-            # odom.pose.pose = Pose(Point(tfed_ps.pose.position.x, tfed_ps.pose.position.y, tfed_ps.pose.position.z), Quaternion(tfed_ps.pose.orientation.x, tfed_ps.pose.orientation.y, tfed_ps.pose.orientation.z, tfed_ps.pose.orientation.w))  # make class Pose() as a instance
-            # #odom.child_frame_id = "ak1_base_link"
-            # [vx, vy, vz, v_roll, v_pitch, v_yaw] = v.devices['controller_2'].get_velocities()
-            # odom.twist.twist = Twist(Vector3(vx, vy, vz), Vector3(v_roll, v_pitch, v_yaw))
-            
-            # # This is all wrong but close enough for now
-            # # np.mat([1[1e-6, 0, 0], [0, 1e-6, 0], [0, 0, 1e-3]])
-            # #odom.pose.covariance = tuple(p_cov.ravel().tolist())
-            # #odom.twist.covariance = tuple(p_cov.ravel().tolist())
-            # self.Jvel_pub.publish(odom)
 
 
 

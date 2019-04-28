@@ -147,23 +147,18 @@ class VelocityControl(object):
         self.print_robot_description()
         rospy.loginfo('Check the sanity of kinematic chain')
         self.print_kdl_chain()
-        
-        
-        self.prev_frame = PyKDL.Frame() # initialize as identity frame
+                
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
-        
-        self._frame1 = PyKDL.Frame()
-        self._frame2 = PyKDL.Frame()
+        self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
 
+        # HTC Vive related members
+        self._fr_t_prev_vr = PyKDL.Frame()
+        self._fr_t_cur_vr = PyKDL.Frame()
         self.pose1 = Pose()
         self.pose2 = Pose()
-       
-        
-
+        self.init_Mat_vTs = np.eye(4, dtype=float) # initial homogen tf matrix; sawyer's ee seen from vr tracker
         rospy.Subscriber("test", itzy, callback=self.msgggg)
-        
-        
-        self.vr0_T_saw0 = np.identity(4)
+                
         self.btn_state = 0
         self.btn_state_2 = 0
         self._gripper = intera_interface.Gripper()
@@ -171,11 +166,10 @@ class VelocityControl(object):
         # control loop
         rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_poseCB)
         while not rospy.is_shutdown():
-            # if rospy.has_param('vel_calc'):
-            #     if not self.isPathPlanned: # if path is not planned
-            #         self.path_planning() # get list of planned waypoints
-            #     # self.calc_joint_vel_2()
-            self.calc_joint_vel_3()
+            if self.btn_state_2:
+                self.calibrate_htc_to_sawyer()
+            if rospy.has_param('vel_calc'):
+                self.calc_joint_vel_3()
             self.r.sleep()
 
 
@@ -498,12 +492,10 @@ class VelocityControl(object):
         self.btn_state = j.buttons[0]
         self.btn_state_2 = j.buttons[1]
         diff = self.btn_state - prev_state 
-        # if j.buttons[0] == 0:
         if diff == 1: # clicked
             self.gripper_close()
         elif diff == -1:
             self.gripper_open()
-        #self.j = j.buttons[0]
 
 
     def gripper_open(self):
@@ -516,13 +508,18 @@ class VelocityControl(object):
 
     
     def msgggg(self, data):
-        #print(1111111111111) # I check that it is printed
         self.pose1 = data.ymg                 # vr_t-1_Pose
         self.pose2 = data.ymg_2               # vr_t_Pose
-        self._frame1 = pm.fromMsg(self.pose1) # vr_t-1_PyKDL.Frame
-        self._frame2 = pm.fromMsg(self.pose2) # vr_t_PyKDL.Frame
+        self._fr_t_prev_vr = pm.fromMsg(self.pose1) # vr_t-1_PyKDL.Frame
+        self._fr_t_cur_vr = pm.fromMsg(self.pose2) # vr_t_PyKDL.Frame
 
     
+    def get_des_frame_from_vr(self):
+        """Return the desired frame for the Sawyer to follow in a single sample step.
+            dtype : ndarray
+        """
+        return pm.toMatrix(self._fr_t_cur_vr)
+
    
     def endpoint_poseCB(self, state):
         """ receives end-effectors' pose and twists for feedback-purpose
@@ -537,85 +534,65 @@ class VelocityControl(object):
         
         self.cur_frame = pm.fromMsg(ee_pose)  # sawyer_t_PyKDL.Frame
 
-        
 
-    def get_err_twist(self, goal_frame = None , dT=0.01):
+    def calibrate_htc_to_sawyer(self):
+        """ execute the following linear-algebraic operation.
+        for : 
+            {b} - base frame (same for both the HTC and Sawyer)
+            {v} - tracker of the HTC vive frame (initilly has offset transform of vTs (Sawyer'pose seen from tracker frame))
+            {s} - ee frame of the sawyer (gripper_tip) 
+        """
+        _cur_fr = self.get_current_frame()
+        b_T_s0 = pm.toMatrix(_cur_fr)
+        b_T_v0 = pm.toMatrix(self._fr_t_cur_vr)
+        self.init_Mat_vTs = np.matmul(inv(b_T_v0), b_T_s0) # numpy 4x4 array
+        self.set_init_frame() # save the robot's pose frame at start of the trajectory.
+        rospy.loginfo(" It's OK to deploy sawyer. vel cal starts in 3 sec")
+        print (self.init_Mat_vTs)
+        print ('===================================================')
+        rospy.sleep(3.0)
+        rospy.set_param('vel_calc')
+       
+
+    def get_err_twist(self, goal_frame = None, dT=0.01):
         """ Get the desirable twist for given error.
         """
-        #_cur_frame = self.get_current_frame()
-
-        if self.btn_state_2 == 1:
-             b_T_saw0 = pm.toMatrix(self.cur_frame) 
-             b_T_vr0 = pm.toMatrix(self._frame2)
-             self.vr0_T_saw0 = np.matmul(inv(b_T_vr0), b_T_saw0) # numpy 4x4 array
-        # else:    
-        #      self.vr0_T_saw0 = np.identity(4)
-
-        self._frame2 = pm.fromMatrix(np.matmul(self.vr0_T_saw0, pm.toMatrix(self._frame2))) 
-         
-        return PyKDL.diff(self.cur_frame,              self._frame2,            dT) 
-        #                 X(t)(Sawyer_t_PyKDL.Frame)   X_d(t)(vr_t_PyKDL.Frame)
+        _des_fr_vr = self.get_des_frame_from_vr()
+        _des_fr_sw = np.matmul(_des_fr_vr, self.init_Mat_vTs)
+        cur_fw_sw = self.get_current_frame()
+        des_fr_sw = pm.fromMatrix(_des_fr_sw)
+        return PyKDL.diff(cur_fw_sw, des_fr_sw, dT) 
 
 
     def get_des_twist(self, dT=0.01):
         """ Get desired twist @ time t, by computing differential of traj_frame @ t=T-1 and t=T
         """
-        #_cur_frame = self.get_current_frame()
-        #return PyKDL.diff(self.prev_frame, _cur_frame, dT)
-        # 
-        # 
-        if self.btn_state_2 == 1:
-            b_T_saw0 = pm.toMatrix(self.cur_frame)
-            b_T_vr0 = pm.toMatrix(self._frame2)
-            self.vr0_T_saw0 = np.matmul(inv(b_T_vr0), b_T_saw0) # numpy 4x4 array
-        # else:    
-        #     self.vr0_T_saw0 = np.identity(4)  
+        return PyKDL.diff(self._fr_t_prev_vr, self._fr_t_cur_vr, dT)            
 
-        self._frame2 = pm.fromMatrix(np.matmul(self.vr0_T_saw0, pm.toMatrix(self._frame2))) 
-        self._frame1 = pm.fromMatrix(np.matmul(self.vr0_T_saw0, pm.toMatrix(self._frame1)))
-         
-        return PyKDL.diff(self._frame1,                  self._frame2,            dT)            
-        #                 X_d(t-1)(vr_t-1_PyKDL.Frame)   X_d(t)(vr_t_PyKDL.Frame)     
-                                                                                     
-        
 
     def integ_error(self, twist_err, dT=0.01):
         """Apply timestep-wise error integration.
         """
-        T = PyKDL.addDelta(self.prev_frame, twist_err, dT) # --> calculate the Integral  
-                                                     
-        #T = PyKDL.addDelta(self.init_frame, twist_err, self.traj_elapse)                                                                            
-        #return PyKDL.diff(self.init_frame, self.cur_frame, self.traj_elapse)        
-                                                                                 
-        return PyKDL.diff(self.init_frame, T, self.traj_elapse)
+        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
+        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+
 
 
 
     def calc_joint_vel_3(self):
         """ calc joint vel using PyKDL IK
         """
-        
-        print(222)
+        dT = self.get_dt()
         with self.mutex:
             q_now = self.joints_to_kdl(type='positions', values=None) # Dtype translation list of joint values to PyKDL Vector
-            #T_sd = self._get_goal_matrix()
-        
-        #dT = self.get_dt()
-        # rospy.logwarn('=============== Time difference ===============')
-        # print (dT)
-        #targ_fr = self.get_frame(T_sd)
-        #err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
         err_twist = self.get_err_twist() # err term twist(Xd - X)
         
-
-        #des_twist = self.get_des_twist(dT) # feed-forward twist value Vd_dot
         des_twist = self.get_des_twist() # feed-forward twist value Vd_dot
         
-        # rospy.logwarn('=============== Twist error ===============')
-        # print (err_twist)
-        # rospy.logwarn('=============== Twist desired ===============')
-        # print (des_twist)
-        #integ_twist = self.integ_error(err_twist, dT)
+        rospy.logwarn('=============== Twist error ===============')
+        print (err_twist)
+        rospy.logwarn('=============== Twist desired ===============')
+        print (des_twist)
         integ_twist = self.integ_error(err_twist)
         # rospy.logwarn('=============== Twist integtaed ===============')
         # print (integ_twist)
@@ -631,14 +608,9 @@ class VelocityControl(object):
         # publish joint command 
         qdot_output = dict(zip(self.names, self.q_dot))
         self.limb.set_joint_velocities(qdot_output)
-        
-        
-        dT = 0.01
+                
+        # dT = 0.01
         self.traj_elapse += dT
-        #self._check_traj(dT=0.01)
-        self.prev_frame = self.cur_frame
-        #                 X(t)(Sawyer_t_PyKDL.Frame)
-        print(333)
 
 
     def get_frame(self, matrix):
@@ -694,9 +666,6 @@ class VelocityControl(object):
         """ Set the frame of the start pose of the trajectory.
         """
         self.init_frame = self.get_current_frame()
-
-
-
 
     def apply_gain(self, prop_err, integ_err):
         Kp = 2.0
