@@ -7,8 +7,6 @@ import tf.transformations as tr
 import threading
 import tf
 
-
-
 # ROS Imports
 import rospy
 from std_msgs.msg import Bool, Int32, Float64
@@ -35,15 +33,9 @@ from PyKDL import *
 from pykdl_utils.kdl_parser import kdl_tree_from_urdf_model
 # conversiom btwn PyKDL frame, ROS message and tf.transformation
 import tf_conversions.posemath as pm
+import inspect
 
-from htc_vive_teleop_stuff.msg import itzy
 
-from tf.transformations import quaternion_from_euler, euler_from_quaternion
-from sensor_msgs.msg import Joy
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3, PoseWithCovarianceStamped, PoseStamped
-import time
-from numpy.linalg import inv
 ####################
 # GLOBAL VARIABLES #
 ####################
@@ -69,12 +61,7 @@ class VelocityControl(object):
 
         if rospy.has_param('vel_calc'):
             rospy.delete_param('vel_calc')
-        
-        
         self.limb = intera_interface.Limb("right")
-        #self._limb = Limb()
-
-
         self.gripper = intera_interface.gripper.Gripper('right')
         # Grab M0 and Blist from saywer_MR_description.py
         self.M0 = s.M #Zero config of right_hand
@@ -87,8 +74,9 @@ class VelocityControl(object):
         self.der_err = 0
         self.int_anti_windup = 10
 
-        self.rate = 100.0  #Hz
-        self.sample_time = 1.0/self.rate * 2.5  #ms
+        # self.rate = 100.0  #Hz
+        self.rate = 50.0  #Hz
+        self.sample_time = 1.0/self.rate  #ms
         self.USE_FIXED_RATE = False # If true -> dT = 0.01, Else -> function call time difference 
         self.current_time = time.time()
         self.last_time = self.current_time
@@ -104,15 +92,15 @@ class VelocityControl(object):
         self.T_goal = np.array(self.kin.forward(self.q))    # Ref se3
         self.cur_frame = pm.fromMatrix(self.T_goal) # -> PyKDL frame
         # robot @ its original pose : position (0.3161, 0.1597, 1.151) , orientation (0.337, 0.621, 0.338, 0.621)
-        self.original_goal = self.T_goal.copy() # robot @ its home pose : 
+        self.original_goal = self.T_goal.copy() # robot @ it\\s home pose : 
         print ('Verifying initial pose...')
         print (self.T_goal)
         self.isCalcOK = False
         self.isPathPlanned = False
         self.traj_err_bound = float(1e-2) # in meter
-        self.plan_time = 2.5 # in sec. can this be random variable?
-        self.rand_plan_min = 5.0
-        self.rand_plan_max = 9.0
+        self.plan_time = 5.0 # in sec. can this be random variable?
+        self.rand_plan_min = 3.0
+        self.rand_plan_max = 4.0
         # Subscriber
         self.ee_position = [0.0, 0.0, 0.0]
         self.ee_orientation = [0.0, 0.0, 0.0, 0.0]
@@ -120,7 +108,7 @@ class VelocityControl(object):
         self.ee_ang_twist = [0.0, 0.0, 0.0]
 
         rospy.Subscriber('/demo/target/', Pose, self.ref_poseCB)
-        
+        rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_poseCB)
 
         self.gripper.calibrate()
         # path planning
@@ -142,33 +130,22 @@ class VelocityControl(object):
         self.ik_v_kdl = PyKDL.ChainIkSolverVel_pinv(self.sawyer_chain)
         self._num_jnts = 7
         self._joint_names = ['right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5', 'right_j6']
-
+        
         rospy.loginfo('Check the URDF of sawyer')
         self.print_robot_description()
         rospy.loginfo('Check the sanity of kinematic chain')
         self.print_kdl_chain()
-                
+        self.prev_frame = PyKDL.Frame() # initialize as identity frame
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
         self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
 
-        # HTC Vive related members
-        self._fr_t_prev_vr = PyKDL.Frame()
-        self._fr_t_cur_vr = PyKDL.Frame()
-        self.pose1 = Pose()
-        self.pose2 = Pose()
-        self.init_Mat_vTs = np.eye(4, dtype=float) # initial homogen tf matrix; sawyer's ee seen from vr tracker
-        rospy.Subscriber("test", itzy, callback=self.msgggg)
-                
-        self.btn_state = 0
-        self.btn_state_2 = 0
-        self._gripper = intera_interface.Gripper()
-        rospy.Subscriber('vive_right', Joy, callback=self.grip_open_close)
         # control loop
-        rospy.Subscriber('/robot/limb/right/endpoint_state', EndpointState , self.endpoint_poseCB)
         while not rospy.is_shutdown():
-            if self.btn_state_2:
-                self.calibrate_htc_to_sawyer()
             if rospy.has_param('vel_calc'):
+                if not self.isPathPlanned: # if path is not planned
+                    _type = rospy.get_param('vel_calc')
+                    self.path_planning(_type) # get list of planned waypoints
+                # self.calc_joint_vel_2()
                 self.calc_joint_vel_3()
             self.r.sleep()
 
@@ -183,16 +160,28 @@ class VelocityControl(object):
             self.original_goal = goal_tmp
 
 
+    def endpoint_poseCB(self, state):
+        """ receives end-effectors' pose and twists for feedback-purpose
+        """
+        ee_pose = state.pose
+        ee_twist = state.twist
+
+        self.ee_position = [ee_pose.position.x, ee_pose.position.y, ee_pose.position.z]
+        self.ee_orientation = [ee_pose.orientation.x, ee_pose.orientation.y, ee_pose.orientation.z, ee_pose.orientation.w]
+        self.ee_lin_twist = [ee_twist.linear.x, ee_twist.linear.y, ee_twist.linear.z]
+        self.ee_ang_twist = [ee_twist.angular.x, ee_twist.angular.y, ee_twist.angular.z]
+        self.cur_frame = pm.fromMsg(ee_pose)
+
+
     def _get_ee_position(self):
         return self.ee_position
 
 
     def _get_goal_matrix(self):
-        # print (self.cur_wp_idx)
         return self.traj_list[self.cur_wp_idx]
 
 
-    def path_planning(self):
+    def path_planning(self, path_type='default'):
         """ Generate desriable waypoints for achieving target pose.
             - Example
             dt = 0.01
@@ -208,16 +197,20 @@ class VelocityControl(object):
 
         X_current = self._get_tf_matrix(current_pose)
         X_goal = self.original_goal
-        # X_goal[2][3] += 0.05
+        X_goal[2][3] += 0.02
         rospy.logwarn('=============== Current pose ===============')
         print (X_current)
         rospy.logwarn('=============== Goal goal ===============')
         print (X_goal)
-        Tf = self.plan_time
-        # Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
+        # Tf = self.plan_time
+        if path_type == 'start':
+            Tf = np.random.uniform(1.0, 1.5)
+        else:
+            Tf = np.random.uniform(self.rand_plan_min, self.rand_plan_max)
         N = int(Tf / dt) # ex: plantime = 7, dt = 0.01 -> N = 700
         self.num_wp = N
-        self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
+        # self.traj_list = r.CartesianTrajectory(X_current, X_goal, Tf=Tf, N=N, method=CUBIC)
+        self.traj_list = r.ScrewTrajectory(X_current, X_goal, Tf=Tf, N=N, method=QUINTIC)
         self.set_init_frame() # save the robot's pose frame at start of the trajectory.
         self.isPathPlanned = True
         # self._get_target_pose()
@@ -235,9 +228,10 @@ class VelocityControl(object):
         elif self.cur_wp_idx == self.num_wp - 1: # robot has reached the last waypoint
             # rospy.logwarn('Reached target object')
             self.cur_wp_idx = 0
-            rospy.delete_param('vel_calc')
             self.isPathPlanned = False
             self.traj_elapse = 0
+            pass
+            rospy.delete_param('vel_calc')
 
 
     def _get_target_pose(self):
@@ -405,8 +399,8 @@ class VelocityControl(object):
         if self.USE_FIXED_RATE:
             return self.sample_time
         else:
-            self.current_time = time.time()
-            return (self.current_time - self.last_time) / 1000.0
+            self.current_time = rospy.get_time()
+            return (self.current_time - self.last_time)
 
 
     def joints_to_kdl(self, type, values=None):
@@ -458,11 +452,12 @@ class VelocityControl(object):
                     tf::poseMsgToKDL(cart_pose, pose_kdl);
                     //                                cur_jnt_position, ee_vel
                     CartToJntVel(JointVelList[i].q, end_effector_vel.GetTwist(), NullSpaceBias[i], result_vel)
+                    ------------------------------------------------------------
+                    ChainIkSolverVel_pinv.CartToJnt(JntArray, Twist, JntArray)                    
                     kin.ik_solver->CartTo
         """
-        frame_vel = PyKDL.FrameVel()
         _joint_vels = self.joints_to_kdl(type='velocities', values=None)
-        # args :   CartToJnt-> (cur_joint_pos, targ_ee_vel, result_joint_vel)  
+        # args :   CartToJnt-> (cur_joint_pos, targ_ee_vel, result_joint_vel)
         if self.ik_v_kdl.CartToJnt(cur_joint_pos, ee_twist, _joint_vels) >= 0:
             return list(_joint_vels)
         else:
@@ -486,131 +481,21 @@ class VelocityControl(object):
         """
         return self.cur_frame
 
-
-    def grip_open_close(self, j):
-        prev_state = self.btn_state
-        self.btn_state = j.buttons[0]
-        self.btn_state_2 = j.buttons[1]
-        diff = self.btn_state - prev_state 
-        if diff == 1: # clicked
-            self.gripper_close()
-        elif diff == -1:
-            self.gripper_open()
-
-
-    def gripper_open(self):
-        self._gripper.open()
-        rospy.sleep(1.0)
-
-    def gripper_close(self):
-        self._gripper.close()
-        rospy.sleep(1.0)
-
     
-    def msgggg(self, data):
-        self.pose1 = data.ymg                 # vr_t-1_Pose
-        self.pose2 = data.ymg_2               # vr_t_Pose
-        self._fr_t_prev_vr = pm.fromMsg(self.pose1) # vr_t-1_PyKDL.Frame
-        self._fr_t_cur_vr = pm.fromMsg(self.pose2) # vr_t_PyKDL.Frame
-
-    
-    def get_des_frame_from_vr(self):
-        """Return the desired frame for the Sawyer to follow in a single sample step.
-            dtype : ndarray
-        """
-        return pm.toMatrix(self._fr_t_cur_vr)
-
-   
-    def endpoint_poseCB(self, state):
-        """ receives end-effectors' pose and twists for feedback-purpose
-        """
-        ee_pose = state.pose
-        ee_twist = state.twist
-
-        self.ee_position = [ee_pose.position.x, ee_pose.position.y, ee_pose.position.z]
-        self.ee_orientation = [ee_pose.orientation.x, ee_pose.orientation.y, ee_pose.orientation.z, ee_pose.orientation.w]
-        self.ee_lin_twist = [ee_twist.linear.x, ee_twist.linear.y, ee_twist.linear.z]
-        self.ee_ang_twist = [ee_twist.angular.x, ee_twist.angular.y, ee_twist.angular.z]
-        
-        self.cur_frame = pm.fromMsg(ee_pose)  # sawyer_t_PyKDL.Frame
-
-
-    def calibrate_htc_to_sawyer(self):
-        """ execute the following linear-algebraic operation.
-        for : 
-            {b} - base frame (same for both the HTC and Sawyer)
-            {v} - tracker of the HTC vive frame (initilly has offset transform of vTs (Sawyer'pose seen from tracker frame))
-            {s} - ee frame of the sawyer (gripper_tip) 
-        """
-        _cur_fr = self.get_current_frame()
-        b_T_s0 = pm.toMatrix(_cur_fr)
-        b_T_v0 = pm.toMatrix(self._fr_t_cur_vr)
-        self.init_Mat_vTs = np.matmul(inv(b_T_v0), b_T_s0) # numpy 4x4 array
-        self.set_init_frame() # save the robot's pose frame at start of the trajectory.
-        rospy.loginfo(" It's OK to deploy sawyer. vel cal starts in 3 sec")
-        print (self.init_Mat_vTs)
-        print ('===================================================')
-        rospy.sleep(3.0)
-        rospy.set_param('vel_calc')
-       
-
-    def get_err_twist(self, goal_frame = None, dT=0.01):
+    def get_err_twist(self, goal_frame, dT):
         """ Get the desirable twist for given error.
         """
-        _des_fr_vr = self.get_des_frame_from_vr()
-        _des_fr_sw = np.matmul(_des_fr_vr, self.init_Mat_vTs)
-        cur_fw_sw = self.get_current_frame()
-        des_fr_sw = pm.fromMatrix(_des_fr_sw)
-        return PyKDL.diff(cur_fw_sw, des_fr_sw, dT) 
+        _cur_frame = self.get_current_frame()
+        return PyKDL.diff(_cur_frame, goal_frame, dT) 
 
 
-    def get_des_twist(self, dT=0.01):
+    def get_des_twist(self, dT):
         """ Get desired twist @ time t, by computing differential of traj_frame @ t=T-1 and t=T
         """
-        return PyKDL.diff(self._fr_t_prev_vr, self._fr_t_cur_vr, dT)            
-
-
-    def integ_error(self, twist_err, dT=0.01):
-        """Apply timestep-wise error integration.
-        """
-        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
-        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
-
-
-
-
-    def calc_joint_vel_3(self):
-        """ calc joint vel using PyKDL IK
-        """
-        dT = self.get_dt()
-        with self.mutex:
-            q_now = self.joints_to_kdl(type='positions', values=None) # Dtype translation list of joint values to PyKDL Vector
-        err_twist = self.get_err_twist() # err term twist(Xd - X)
-        
-        des_twist = self.get_des_twist() # feed-forward twist value Vd_dot
-        
-        rospy.logwarn('=============== Twist error ===============')
-        print (err_twist)
-        rospy.logwarn('=============== Twist desired ===============')
-        print (des_twist)
-        integ_twist = self.integ_error(err_twist)
-        # rospy.logwarn('=============== Twist integtaed ===============')
-        # print (integ_twist)
-        err_twist, integ_twist = self.apply_gain(err_twist, integ_twist)
-        print('des_twist',   des_twist)
-        print('err_twist',   err_twist)
-        print('integ_twist', integ_twist)
-        total_twist = des_twist + err_twist + integ_twist # FF + Pg*Err + Ig*Integ(Err)
-        
-        self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
-        self.q_dot = self.scale_joint_vel(self.q_dot)
-        
-        # publish joint command 
-        qdot_output = dict(zip(self.names, self.q_dot))
-        self.limb.set_joint_velocities(qdot_output)
-                
-        # dT = 0.01
-        self.traj_elapse += dT
+        if self.cur_wp_idx > 1: 
+            return PyKDL.diff(pm.fromMatrix(self.traj_list[self.cur_wp_idx - 1]), pm.fromMatrix(self.traj_list[self.cur_wp_idx]), dT)
+        else: # cur_wp_idx == num_wp
+            return PyKDL.diff(pm.fromMatrix(self.traj_list[self.cur_wp_idx]), pm.fromMatrix(self.traj_list[self.cur_wp_idx + 1]), dT)
 
 
     def get_frame(self, matrix):
@@ -659,19 +544,88 @@ class VelocityControl(object):
         # self.stop_oscillating()
         self.last_error = Xe
         self.last_time = self.current_time
-        self._check_traj()
+        self._check_traj(dT)
 
 
     def set_init_frame(self):
         """ Set the frame of the start pose of the trajectory.
         """
         self.init_frame = self.get_current_frame()
+        self.integ_frame = self.init_frame
+
+
+    def integ_error(self, twist_err, dT):
+        """Apply timestep-wise error integration.
+        """
+        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
+        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+
 
     def apply_gain(self, prop_err, integ_err):
-        Kp = 2.0
-        Ki = 0.05
+        Kp = 1.0
+        Ki = 1.0
         return Kp * prop_err, Ki * integ_err
 
+
+    def to_kdl_twist(self, twst):
+        """ Return the twist of PyKDL for given list type twist.
+        """
+        return PyKDL.Twist(PyKDL.Vector(twst[0], twst[1], twst[2]), PyKDL.Vector(twst[3], twst[4], twst[5]))
+
+
+    def adj_to_twist(self, err_matrix, des_twist):
+        return list(np.dot(r.Adjoint(err_matrix), des_twist))
+
+
+    def get_cur_fk_matrix(self):
+        self.get_q_now()
+        return self.kin.forward(self.q)
+
+
+    def calc_joint_vel_3(self):
+        """ calc joint vel using PyKDL IK
+        """
+        with self.mutex:
+            q_now = self.joints_to_kdl(type='positions', values=None)
+            T_sd = self._get_goal_matrix() # 
+            targ_fr = self.get_frame(T_sd)
+        dT = self.get_dt()
+        err_mat = np.dot(np.linalg.inv(pm.toMatrix(self.get_current_frame())), pm.toMatrix(targ_fr))
+
+        # err_twist = self.to_kdl_twist(r.se3ToVec(r.MatrixLog6(err_mat)).tolist()) # cbModern robotics pp 230 22Nff
+        err_twist = self.get_err_twist(targ_fr, dT) # err term twist(Xd - X)
+        # err_twist = pm.fromMatrix(cur_fk) * _err_twist  
+        # err_twist *= 0.0
+
+        # des_twist = self.get_des_twist(dT) # feed-forward twist value Vd_dot
+        des_twist = self.get_des_twist(dT) # feed-forward twist value Vd_dot
+        # des_twist = pm.fromMatrix(cur_fk) * _des_twist        
+        # des_twist = self.adj_to_twist(err_mat, _des_twist)
+        # des_twist =self.to_kdl_twist(des_twist)
+        rospy.logwarn('=============== Twist error ===============')
+        print (err_twist)
+        rospy.logwarn('=============== Twist desired ===============')
+        print (des_twist, self.cur_wp_idx)
+        integ_twist = self.integ_error(err_twist, dT)
+        # rospy.logwarn('=============== Twist integrated ===============')
+        # print (integ_twist)
+        err_twist, integ_twist = self.apply_gain(err_twist, integ_twist)
+        # total_twist = des_twist  + err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
+        # self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
+        self.q_dot = self.kdl_inv_vel_kine(cur_joint_pos=q_now, ee_twist=total_twist)
+        self.q_dot = self.scale_joint_vel(self.q_dot)
+        # publish joint command 
+        qdot_output = dict(zip(self.names, self.q_dot))
+        # rospy.logwarn('=============== Computed joint vels ===============')
+        # print (qdot_output)
+        self.prev_frame = self.cur_frame # the call of this line seems crucial!!
+        self.limb.set_joint_velocities(qdot_output)
+        rospy.logwarn('=============== Twist actual ===============')
+        print (self.ee_ang_twist + self.ee_lin_twist)
+        
+        self._check_traj(dT)
+        self.last_time = self.current_time
 
 
 
@@ -680,8 +634,6 @@ def main():
 
     try:
         vc = VelocityControl()
-        p_t = time.time()
-        p_t = p_t + 3
     except rospy.ROSInterruptException:
         pass
 
@@ -689,4 +641,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
