@@ -74,8 +74,7 @@ class VelocityControl(object):
         self.der_err = 0
         self.int_anti_windup = 10
 
-        # self.rate = 100.0  #Hz
-        self.rate = 50.0  #Hz
+        self.rate = 100.0  #Hz
         self.sample_time = 1.0/self.rate  #ms
         self.USE_FIXED_RATE = False # If true -> dT = 0.01, Else -> function call time difference 
         self.current_time = time.time()
@@ -87,7 +86,8 @@ class VelocityControl(object):
         self.time_limit = rospy.get_param("~time_limit", TIME_LIMIT)
         self.damping = rospy.get_param("~damping", DAMPING)
         self.joint_vel_limit = rospy.get_param("~joint_vel_limit", JOINT_VEL_LIMIT)
-        self.q = np.zeros(7)        # Joint angles
+        # self.q = np.zeros(7)        # Joint angles
+        self.q = np.array([0.0, -0.5, 0.0, 0.8, 0.0, 1.2, 0.0])        # Joint angles
         self.qdot = np.zeros(7)     # Joint velocities
         self.T_goal = np.array(self.kin.forward(self.q))    # Ref se3
         self.cur_frame = pm.fromMatrix(self.T_goal) # -> PyKDL frame
@@ -138,14 +138,13 @@ class VelocityControl(object):
         self.prev_frame = PyKDL.Frame() # initialize as identity frame
         self.init_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
         self.integ_frame = PyKDL.Frame() # frame of the start pose of the trajectory 
-
+        self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0))
         # control loop
         while not rospy.is_shutdown():
             if rospy.has_param('vel_calc'):
                 if not self.isPathPlanned: # if path is not planned
                     _type = rospy.get_param('vel_calc')
                     self.path_planning(_type) # get list of planned waypoints
-                # self.calc_joint_vel_2()
                 self.calc_joint_vel_3()
             self.r.sleep()
 
@@ -153,7 +152,7 @@ class VelocityControl(object):
     def ref_poseCB(self, goal_pose): # Takes target pose, returns ref se3
         rospy.logdebug("ref_pose_cb called in velocity_control.py")
         # p = np.array([some_pose.position.x, some_pose.position.y, some_pose.position.z])
-        p = np.array([goal_pose.position.x, goal_pose.position.y, goal_pose.position.z])
+        p = np.array([goal_pose.position.x, goal_pose.position.y + 0.05, goal_pose.position.z])
         quat = np.array([goal_pose.orientation.x, goal_pose.orientation.y, goal_pose.orientation.z, goal_pose.orientation.w])
         goal_tmp = tr.compose_matrix(angles=tr.euler_from_quaternion(quat, 'sxyz'), translate=p) # frame is spatial 'sxyz', return Euler angle from quaternion for specified axis sequence.
         with self.mutex:
@@ -221,7 +220,7 @@ class VelocityControl(object):
         """
         _ee_position = self._get_ee_position()
         _targ_wp_position = tr.translation_from_matrix(self.traj_list[self.cur_wp_idx])
-        # if np.linalg.norm( np.array(_ee_position) -_targ_wp_position) <= self.traj_err_bound:
+
         if self.cur_wp_idx < self.num_wp - 1: # indicate next waypoint
             self.cur_wp_idx += 1
             self.traj_elapse += dT
@@ -230,6 +229,7 @@ class VelocityControl(object):
             self.cur_wp_idx = 0
             self.isPathPlanned = False
             self.traj_elapse = 0
+            self.integ_twist = PyKDL.Twist(PyKDL.Vector(0, 0, 0), PyKDL.Vector(0, 0, 0)) # initialize integral twist 
             pass
             rospy.delete_param('vel_calc')
 
@@ -557,13 +557,16 @@ class VelocityControl(object):
     def integ_error(self, twist_err, dT):
         """Apply timestep-wise error integration.
         """
-        self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
-        return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+        # self.integ_frame = PyKDL.addDelta(self.integ_frame, twist_err, dT)
+        # return PyKDL.diff(self.init_frame, self.integ_frame, self.traj_elapse)
+        if np.linalg.norm(list(self.integ_twist)) < self.int_anti_windup:
+            self.integ_twist += twist_err * dT
+        return self.integ_twist
 
 
     def apply_gain(self, prop_err, integ_err):
-        Kp = 1.0
-        Ki = 1.0
+        Kp = 1.5
+        Ki = 5.0
         return Kp * prop_err, Ki * integ_err
 
 
@@ -607,8 +610,8 @@ class VelocityControl(object):
         rospy.logwarn('=============== Twist desired ===============')
         print (des_twist, self.cur_wp_idx)
         integ_twist = self.integ_error(err_twist, dT)
-        # rospy.logwarn('=============== Twist integrated ===============')
-        # print (integ_twist)
+        rospy.logwarn('=============== Twist integrated ===============')
+        print (integ_twist)
         err_twist, integ_twist = self.apply_gain(err_twist, integ_twist)
         # total_twist = des_twist  + err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
         total_twist = err_twist  + integ_twist # FF + Pg*Err + Ig*Integ(Err)
@@ -621,8 +624,8 @@ class VelocityControl(object):
         # print (qdot_output)
         self.prev_frame = self.cur_frame # the call of this line seems crucial!!
         self.limb.set_joint_velocities(qdot_output)
-        rospy.logwarn('=============== Twist actual ===============')
-        print (self.ee_ang_twist + self.ee_lin_twist)
+        # rospy.logwarn('=============== Twist actual ===============')
+        # print (self.ee_ang_twist + self.ee_lin_twist)
         
         self._check_traj(dT)
         self.last_time = self.current_time
